@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
   "lark >= 1.1.8",
-  "vllm >= 0.2.6",
+  "vllm >= 0.3.0",
   "transformers",
 ]
 

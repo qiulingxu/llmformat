@@ -24,6 +24,7 @@ class RuleDef(str):
     def dependencies(self):
         return self._dependencies
 
+ExprType = Union[RuleName, RuleDef]
 class Rule():
     def __init__(self, rule_name : RuleName, rule_def :RuleDef):
         super.__init__()
@@ -44,15 +45,12 @@ class RuleManager():
         if basefile is None:
             basepath = path.dirname(__file__)
             filepath = path.abspath(path.join(basepath, "grammar_files", "base.bnf"))
-        self.symbol2def, self.char2symbol = parse_lex_definition(filepath)
+        self.grammar = open(filepath, "r").read()
+        self.symbol2def, self.char2symbol = parse_lex_definition(self.grammar)
         if rules is None:
             self.rules = {}
         else:
             self.rules = rules
-        """global _default_context
-        if _default_context["manager"] is not None:
-            raise ValueError("RuleManager does not support initialize twice.")
-        _default_context["manager"] = self"""
     
     def get_rule(self, rule_name : RuleName) -> RuleDef:
         if rule_name not in self.rules:
@@ -70,10 +68,12 @@ class RuleManager():
         for rule_name, rule in rules:
             self.add_rule(rule_name, rule)
 
-    def to_bnf_grammar(self):
+    def to_bnf_grammar(self, add_lex_rule = True):
         rules_bnf = ""
         for rule_name, rule_def in self.rules.items():
             rules_bnf += f"{rule_name} : {rule_def}\n"
+        if add_lex_rule:
+            rules_bnf += self.grammar
         return rules_bnf
 
 _default_context = {"manager": RuleManager()}
@@ -83,7 +83,10 @@ def get_curr_context():
         raise ValueError("RuleManager has not been set up.")
     else:
         return _default_context["manager"]
-    
+
+def set_new_rule_manager(manager : RuleManager):
+    _default_context["manager"] = manager
+
 def gen_bnf_grammar():
     return _default_context["manager"].to_bnf_grammar()
 
@@ -146,12 +149,12 @@ class BaseFormat():
         return RuleDef(" ".join(lst))
     
     @staticmethod
-    def rule_for_adding_quotes(rule:RuleName, quotes_str: List[Tuple[str, str]]) -> RuleDef:
+    def rule_for_adding_quotes(rule:RuleName, quotes_str: List[Tuple[ExprType, ExprType]]) -> RuleDef:
         """_summary_
 
         Args:
             string (str): the rule for enclosed content
-            quotes_str (List[Tuple): A list of possible quotes. Each tuple indicates rule for left quote and rule for right quote
+            quotes_str (List[Tuple(ExprType, ExprType)]: A list of possible quotes. Each tuple indicates rule for left quote and rule for right quote
 
         Returns:
             str: _description_
@@ -196,7 +199,18 @@ class BaseFormat():
     def string_to_symbol(string: str) -> str:
         return " ".join(BaseFormat.chars_to_symbol(string))
 
-    
+    @staticmethod
+    def rule_for_repeat(rule: ExprType, least_occurance=0):
+        prefix_rule = ""
+        for i in range(least_occurance):
+            prefix_rule += rule + " "
+        return RuleDef(f"{prefix_rule} ({rule})*")
+
+    def rule_for_list(list_head: ExprType, list_tail: ExprType, least_occurance=0):
+        prefix_rule = list_head
+        for i in range(least_occurance):
+            prefix_rule +=  " " + list_tail
+        return RuleDef(f"{prefix_rule} ({list_tail})*")
 
 RuleNameOrFormat = Union[BaseFormat, RuleName]
 def get_rule_name(rule: RuleNameOrFormat) -> str:
@@ -209,7 +223,18 @@ def get_rule_name(rule: RuleNameOrFormat) -> str:
     else:
         raise ValueError(f"rule {rule} of type {type(rule)} is neither BaseFormat or RuleName.")
 
-
+class WhiteSpaceFormat(BaseFormat):
+    """Generates rule for white space characters"""
+    def __init__(self, possible_chars = "\t\r\n "):
+        super().__init__()
+        self.possible_chars = possible_chars
+        self.set_rule("wss", self.build_def())
+        
+    def build_def(self):
+        return WhiteSpaceFormat.rule_for_or(
+            [WhiteSpaceFormat.rule_for_string(ch) for ch in self.possible_chars]
+            )
+        
 class QuotedStringFormat(BaseFormat):
     def __init__(self, 
                  rule_name: RuleName ,
@@ -252,7 +277,7 @@ class QuotedStringFormat(BaseFormat):
                 to_escape_char_symbols = self.chars_to_symbol(escape_set)
                 part1 = self.chars_to_symbol(["\\"])[0]
                 part2 = "|".join(to_escape_char_symbols)
-                escaped_char_rule = f"{part1} | ({part2})"
+                escaped_char_rule = f"{part1} ({part2})"
                 escaped_char_rulename = f"ec_{quote_name}"
                 self.context.add_rule(escaped_char_rulename, escaped_char_rule)
 
@@ -302,6 +327,7 @@ class BooleanFormat(BaseFormat):
                                           BooleanFormat.rule_for_string(false_string)])
         return rule
     
+
 class NoneFormat(BaseFormat):
     """Generates rule for fixed string characters"""
     def __init__(self, capitalize=False):
@@ -320,10 +346,7 @@ class SimpleQuotedStringFormat(BaseFormat):
     """Generates rule for any escapped characters"""
     def __init__(self,):
         super().__init__()
-        if allowed_quotes is None:
-            allowed_quotes = [("\"", "\""), ("\'", "\'")]
-            
-        self.allowed_quotes = allowed_quotes
+        self.allowed_quotes = [("\"", "\""), ("\'", "\'")]
         self.set_rule("string", self.build_def())
         
     def build_def(self):
@@ -387,8 +410,16 @@ class SimpleDictFormat(BaseFormat):
 
 class JsonFormat(BaseFormat):
     def __init__(self, 
-                 value_types : List[RuleNameOrFormat] = [BooleanFormat(), SimpleArrayFormat(), SimpleDictFormat(), NumberFormat(), NoneFormat()]):
+                 value_types : List[RuleNameOrFormat] = 
+                    [BooleanFormat(), 
+                     SimpleArrayFormat(),
+                     SimpleDictFormat(),
+                     NumberFormat(), 
+                     NoneFormat(),
+                     SimpleQuotedStringFormat()]):
         super().__init__()
+        # Added definition for white space.
+        WhiteSpaceFormat()
         self.value_types = []
         for name in value_types:
             self.value_types.append(get_rule_name(name))
@@ -409,13 +440,45 @@ class LLMFormat(BaseFormat):
             [RuleName("wss"), self.start_rule_name, RuleName("wss"), RuleName(_EOS_TOKEN)]
         )
 
+class CustomJsonFormat(BaseFormat):
+    def __init__(self, sample_json : Any):
+        super().__init__()
+        self.iter_gen(sample_json)
+        
+    def iter_gen(self, sample_json) -> RuleName:
+        accept_class = [dict, tuple, list]
+        if isinstance(sample_json, dict):
+            pairs_rule = []
+            for k, v in sample_json.items():
+                assert isinstance(k, str), "The key should follow string format."
+                pair_rule = [CustomJsonFormat.rule_for_adding_quotes(CustomJsonFormat.rule_for_string(k)),
+                             "[wss]",
+                             self.context.char2symbol(":"),
+                             "[wss]",
+                             self.iter_gen(v)
+                             ]
+                pairs_rule.append(CustomJsonFormat.rule_for_sequence(pair_rule))
+            pairs_rule = " [wss],[wss] ".join(pairs_rule)
+            return CustomJsonFormat.rule_for_sequence([self.context.char2symbol("{"), pairs_rule, self.context.char2symbol("}")])
+        elif isinstance(sample_json, list):
+            assert (len(sample_json) > 0), "The list should have at least one element to determine the proper type."
+            element_rule = self.iter_gen(sample_json[0])
+            return CustomJsonFormat.rule_for_list(element_rule, "[wss],[wss]" + element_rule)
+        elif isinstance(sample_json, str):
+            return CustomJsonFormat.rule_for_adding_quotes(CustomJsonFormat.rule_for_string(sample_json))
+        elif isinstance(sample_json, bool):
+            return BooleanFormat()
+        elif isinstance(sample_json, (int, float)):
+            return NumberFormat()
+        
+
 def get_default_format(dependencies:Dict[str, BaseFormat]):
     default_format_translation = \
         {
             "string" : SimpleQuotedStringFormat,
             "number" : NumberFormat,
-            "array" : ArrayFormat,
-            "dict" : DictFormat
+            "array" : SimpleArrayFormat,
+            "dict" : SimpleDictFormat
             
         }
     completed_dependencies = dependencies.copy()

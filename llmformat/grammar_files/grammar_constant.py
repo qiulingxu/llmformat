@@ -5,15 +5,15 @@ from llmformat.constant import _SPECIAL_TOKENS
 from llmformat.lex_helper import symbol_character_parse
 
 
-def parse_lex_definition(file_path):
-    lex_definition = open(file_path, "r")
+def parse_lex_definition(grammar):
+    lex_definition = grammar
     symbol2def = {}
     char2symbol = {}
     def add_char_symbol(symbol, char):
         nonlocal char2symbol
         char2symbol[char] = symbol
 
-    for line in lex_definition.readlines():
+    for line in lex_definition.split("\n"):
         line = line.strip()
         if line.startswith("#") or line.startswith("\\") or line.startswith("//"):
             continue

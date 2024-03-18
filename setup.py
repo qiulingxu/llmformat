@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-VERSION = '0.0.2.1' 
+VERSION = '0.0.2.2' 
 DESCRIPTION = 'llmformat'
 LONG_DESCRIPTION = 'Format LLM language by using LALR(1) grammar. Supports JSON, XML, etc.'
 

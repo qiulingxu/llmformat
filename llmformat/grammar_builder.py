@@ -1,6 +1,6 @@
 from abc import ABC
 from os import path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from typing_extensions import Self
 
@@ -47,11 +47,20 @@ class RuleManager():
             filepath = path.abspath(path.join(basepath, "grammar_files", "base.bnf"))
         self.grammar = open(filepath, "r").read()
         self.symbol2def, self.char2symbol = parse_lex_definition(self.grammar)
+        self.increment_id_cnt = 0
         if rules is None:
             self.rules = {}
         else:
             self.rules = rules
-    
+
+    def __enter__(self):
+        self.prev_context = _default_context["manager"]
+        set_new_rule_manager(self)
+        return self
+ 
+    def __exit__(self, *args):
+        set_new_rule_manager(self.prev_context)
+
     def get_rule(self, rule_name : RuleName) -> RuleDef:
         if rule_name not in self.rules:
             raise KeyError(f"{rule_name} is not found in rules.")
@@ -75,8 +84,14 @@ class RuleManager():
         if add_lex_rule:
             rules_bnf += self.grammar
         return rules_bnf
+    
+    def get_unique_generated_rule_id(self):
+        id_name = "rule_" + str(self.increment_id_cnt)
+        self.increment_id_cnt += 1
+        return id_name
 
-_default_context = {"manager": RuleManager()}
+
+_default_context = {"manager": None}
 
 def get_curr_context():
     if _default_context["manager"] is None:
@@ -98,6 +113,7 @@ class BaseFormat():
         if context is None:
             context = get_curr_context()
         self.context = context
+        self._rule_name = None
     
     def set_rule(self, rule_name, rule_def):
         if isinstance(rule_name, str):
@@ -206,12 +222,13 @@ class BaseFormat():
             prefix_rule += rule + " "
         return RuleDef(f"{prefix_rule} ({rule})*")
 
+    @staticmethod
     def rule_for_list(list_head: ExprType, list_tail: ExprType, least_occurance=0):
         prefix_rule = list_head
         for i in range(least_occurance):
             prefix_rule +=  " " + list_tail
         return RuleDef(f"{prefix_rule} ({list_tail})*")
-
+    
 RuleNameOrFormat = Union[BaseFormat, RuleName]
 def get_rule_name(rule: RuleNameOrFormat) -> str:
     if isinstance(rule, BaseFormat):
@@ -410,14 +427,15 @@ class SimpleDictFormat(BaseFormat):
 
 class JsonFormat(BaseFormat):
     def __init__(self, 
-                 value_types : List[RuleNameOrFormat] = 
-                    [BooleanFormat(), 
+                 value_types : List[RuleNameOrFormat] = None):
+        super().__init__()
+        if value_types is None:
+            value_types = [BooleanFormat(), 
                      SimpleArrayFormat(),
                      SimpleDictFormat(),
                      NumberFormat(), 
                      NoneFormat(),
-                     SimpleQuotedStringFormat()]):
-        super().__init__()
+                     SimpleQuotedStringFormat()]
         # Added definition for white space.
         WhiteSpaceFormat()
         self.value_types = []
@@ -443,7 +461,8 @@ class LLMFormat(BaseFormat):
 class CustomJsonFormat(BaseFormat):
     def __init__(self, sample_json : Any):
         super().__init__()
-        self.iter_gen(sample_json)
+        rule = self.iter_gen(sample_json)
+        self.set_rule("json_"+ self.context.get_unique_generated_rule_id(), rule)
         
     def iter_gen(self, sample_json) -> RuleName:
         accept_class = [dict, tuple, list]
@@ -451,25 +470,34 @@ class CustomJsonFormat(BaseFormat):
             pairs_rule = []
             for k, v in sample_json.items():
                 assert isinstance(k, str), "The key should follow string format."
-                pair_rule = [CustomJsonFormat.rule_for_adding_quotes(CustomJsonFormat.rule_for_string(k)),
+                pair_rule = [CustomJsonFormat.rule_for_adding_quotes(CustomJsonFormat.rule_for_string(k), [("\"", "\""), ["\'", "\'"]]),
                              "[wss]",
-                             self.context.char2symbol(":"),
+                             self.context.char2symbol[":"],
                              "[wss]",
                              self.iter_gen(v)
                              ]
                 pairs_rule.append(CustomJsonFormat.rule_for_sequence(pair_rule))
             pairs_rule = " [wss],[wss] ".join(pairs_rule)
-            return CustomJsonFormat.rule_for_sequence([self.context.char2symbol("{"), pairs_rule, self.context.char2symbol("}")])
+            rule_def = CustomJsonFormat.rule_for_sequence([self.context.char2symbol["{"], pairs_rule, self.context.char2symbol["}"]])
+            rule_name = self.context.get_unique_generated_rule_id()
+            self.context.add_rule(rule_name, rule_def)
+            return rule_name
         elif isinstance(sample_json, list):
             assert (len(sample_json) > 0), "The list should have at least one element to determine the proper type."
             element_rule = self.iter_gen(sample_json[0])
-            return CustomJsonFormat.rule_for_list(element_rule, "[wss],[wss]" + element_rule)
+            rule_name = self.context.get_unique_generated_rule_id()
+            rule_def = CustomJsonFormat.rule_for_list(element_rule, "[wss],[wss]" + element_rule)
+            self.context.add_rule(rule_name, rule_def)
+            return rule_name
         elif isinstance(sample_json, str):
-            return CustomJsonFormat.rule_for_adding_quotes(CustomJsonFormat.rule_for_string(sample_json))
+            rule_name = self.context.get_unique_generated_rule_id()
+            rule_def = CustomJsonFormat.rule_for_adding_quotes(CustomJsonFormat.rule_for_string(sample_json), [("\"", "\""), ["\'", "\'"]])
+            self.context.add_rule(rule_name, rule_def)
+            return rule_name
         elif isinstance(sample_json, bool):
-            return BooleanFormat()
+            return BooleanFormat().rule_name
         elif isinstance(sample_json, (int, float)):
-            return NumberFormat()
+            return NumberFormat().rule_name
         
 
 def get_default_format(dependencies:Dict[str, BaseFormat]):
